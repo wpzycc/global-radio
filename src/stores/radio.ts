@@ -11,7 +11,19 @@ export const useRadioStore = defineStore('radio', () => {
   const countries = ref<Country[]>([])
   const languages = ref<Language[]>([])
   const tags = ref<Tag[]>([])
-  const isLoading = ref(false)
+  const isLoadingStations = ref(false)
+  const isLoadingTopStations = ref(false)
+  const isLoadingLatestStations = ref(false)
+  const isLoadingMeta = ref(false)
+  const isLoadingStationDetail = ref(false)
+  const isLoading = computed(
+    () =>
+      isLoadingStations.value ||
+      isLoadingTopStations.value ||
+      isLoadingLatestStations.value ||
+      isLoadingMeta.value ||
+      isLoadingStationDetail.value
+  )
   const error = ref<string | null>(null)
   const searchQuery = ref('')
   const selectedCountry = ref('')
@@ -72,7 +84,7 @@ export const useRadioStore = defineStore('radio', () => {
   // 搜索电台
   const searchStations = async (params: RadioSearchParams = {}) => {
     try {
-      isLoading.value = true
+      isLoadingStations.value = true
       error.value = null
       
       const searchParams: RadioSearchParams = {
@@ -122,7 +134,7 @@ export const useRadioStore = defineStore('radio', () => {
       error.value = err instanceof Error ? err.message : '搜索失败'
       console.error('搜索电台错误:', err)
     } finally {
-      isLoading.value = false
+      isLoadingStations.value = false
     }
   }
 
@@ -132,7 +144,7 @@ export const useRadioStore = defineStore('radio', () => {
       return
     }
     try {
-      isLoading.value = true
+      isLoadingTopStations.value = true
       error.value = null
       
       // 获取当前用户语言设置
@@ -140,13 +152,13 @@ export const useRadioStore = defineStore('radio', () => {
       const languageStore = useLanguageStore()
       const userLanguage = languageStore.currentLanguage
       
-      const response = await radioAPI.getTopStations(50, userLanguage)
+      const response = await radioAPI.getTopStations(50, userLanguage, { bypassCache: force })
       topStations.value = response.data || []
     } catch (err) {
       error.value = err instanceof Error ? err.message : '加载热门电台失败'
       console.error('加载热门电台错误:', err)
     } finally {
-      isLoading.value = false
+      isLoadingTopStations.value = false
     }
   }
 
@@ -156,21 +168,21 @@ export const useRadioStore = defineStore('radio', () => {
       return
     }
     try {
-      isLoading.value = true
+      isLoadingLatestStations.value = true
       error.value = null
-      latestStations.value = await radioAPI.getLatestStations(50)
+      latestStations.value = await radioAPI.getLatestStations(50, { bypassCache: force })
     } catch (err) {
       error.value = err instanceof Error ? err.message : '加载最新电台失败'
       console.error('加载最新电台错误:', err)
     } finally {
-      isLoading.value = false
+      isLoadingLatestStations.value = false
     }
   }
 
   // 加载随机电台
   const loadRandomStations = async () => {
     try {
-      isLoading.value = true
+      isLoadingStations.value = true
       error.value = null
       const response = await radioAPI.getRandomStations(50)
       stations.value = response.data || []
@@ -179,7 +191,7 @@ export const useRadioStore = defineStore('radio', () => {
       error.value = err instanceof Error ? err.message : '加载随机电台失败'
       console.error('加载随机电台错误:', err)
     } finally {
-      isLoading.value = false
+      isLoadingStations.value = false
     }
   }
 
@@ -198,7 +210,7 @@ export const useRadioStore = defineStore('radio', () => {
   // 根据国家加载电台
   const loadStationsByCountry = async (countryCode: string) => {
     try {
-      isLoading.value = true
+      isLoadingStations.value = true
       error.value = null
       selectedCountry.value = countryCode
       const response = await radioAPI.getStationsByCountry(countryCode, 50)
@@ -208,14 +220,14 @@ export const useRadioStore = defineStore('radio', () => {
       error.value = err instanceof Error ? err.message : '加载国家电台失败'
       console.error('加载国家电台错误:', err)
     } finally {
-      isLoading.value = false
+      isLoadingStations.value = false
     }
   }
 
   // 根据标签加载电台
   const loadStationsByTag = async (tag: string) => {
     try {
-      isLoading.value = true
+      isLoadingStations.value = true
       error.value = null
       selectedTag.value = tag
       stations.value = await radioAPI.getStationsByTag(tag, 50)
@@ -224,7 +236,7 @@ export const useRadioStore = defineStore('radio', () => {
       error.value = err instanceof Error ? err.message : '加载标签电台失败'
       console.error('加载标签电台错误:', err)
     } finally {
-      isLoading.value = false
+      isLoadingStations.value = false
     }
   }
 
@@ -239,7 +251,7 @@ export const useRadioStore = defineStore('radio', () => {
   // 加载国家列表
   const loadCountries = async () => {
     try {
-      isLoading.value = true
+      isLoadingMeta.value = true
       error.value = null
       const response = await radioAPI.getCountries()
       countries.value = response.data || []
@@ -247,7 +259,7 @@ export const useRadioStore = defineStore('radio', () => {
       error.value = err instanceof Error ? err.message : '加载国家列表失败'
       console.error('加载国家列表错误:', err)
     } finally {
-      isLoading.value = false
+      isLoadingMeta.value = false
     }
   }
 
@@ -312,7 +324,11 @@ export const useRadioStore = defineStore('radio', () => {
   // 获取推荐电台（基于语言）
   const getRecommendedStations = async () => {
     try {
-      isLoading.value = true
+      if (topStations.value.length > 0) {
+        return topStations.value.slice(0, 20)
+      }
+
+      isLoadingTopStations.value = true
       
       // 获取当前用户语言设置
       const { useLanguageStore } = await import('@/stores/language')
@@ -326,14 +342,14 @@ export const useRadioStore = defineStore('radio', () => {
       console.error('获取推荐电台失败:', error)
       return []
     } finally {
-      isLoading.value = false
+      isLoadingTopStations.value = false
     }
   }
 
   // 根据UUID获取单个电台
   const getStationByUuid = async (uuid: string): Promise<RadioStation | null> => {
     try {
-      isLoading.value = true
+      isLoadingStationDetail.value = true
       const result = await radioAPI.getStationByUUID(uuid)
       return result
     } catch (err) {
@@ -341,7 +357,7 @@ export const useRadioStore = defineStore('radio', () => {
       console.error('根据UUID加载电台错误:', err)
       return null
     } finally {
-      isLoading.value = false
+      isLoadingStationDetail.value = false
     }
   }
 
@@ -354,6 +370,11 @@ export const useRadioStore = defineStore('radio', () => {
     languages,
     tags,
     isLoading,
+    isLoadingStations,
+    isLoadingTopStations,
+    isLoadingLatestStations,
+    isLoadingMeta,
+    isLoadingStationDetail,
     error,
     searchQuery,
     selectedCountry,

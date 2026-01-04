@@ -10,6 +10,10 @@ interface APIProvider {
   priority: number
 }
 
+type CacheOptions = {
+  bypassCache?: boolean
+}
+
 class RadioAPI {
   private apiProviders: APIProvider[] = [
     // Radio Browser API (primary)
@@ -27,6 +31,12 @@ class RadioAPI {
   private initializationPromise: Promise<void> | null = null
   private isInitialized = false
   private debugEnabled = !!(import.meta as any).env?.DEV
+  private cacheTtlMs = 5 * 60 * 1000
+  private cache = {
+    topStations: new Map<string, { timestamp: number; data: ApiResponse<RadioStation[]> }>(),
+    latestStations: new Map<string, { timestamp: number; data: RadioStation[] }>(),
+    stationSearch: new Map<string, { timestamp: number; data: RadioStation[] }>()
+  }
 
   constructor() {
     this.currentProvider = this.apiProviders[0]
@@ -35,10 +45,37 @@ class RadioAPI {
     this.initializationPromise = this.initializeAPI()
   }
 
-  private createAPIInstance(provider: APIProvider): AxiosInstance {
+  private stableSerialize(value: unknown): string {
+    if (value === null || value === undefined) return String(value)
+    if (Array.isArray(value)) return `[${value.map(v => this.stableSerialize(v)).join(',')}]`
+    if (typeof value === 'object') {
+      const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+      return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${this.stableSerialize(v)}`).join(',')}}`
+    }
+    return JSON.stringify(value)
+  }
+
+  private getFromCache<T>(map: Map<string, { timestamp: number; data: T }>, key: string): T | null {
+    const cached = map.get(key)
+    if (!cached) return null
+    if (Date.now() - cached.timestamp > this.cacheTtlMs) {
+      map.delete(key)
+      return null
+    }
+    return cached.data
+  }
+
+  private setCache<T>(map: Map<string, { timestamp: number; data: T }>, key: string, data: T): void {
+    map.set(key, { timestamp: Date.now(), data })
+    if (map.size > 80) {
+      map.clear()
+    }
+  }
+
+  private createAPIInstance(provider: APIProvider, timeoutMs: number = 10000): AxiosInstance {
     return axios.create({
       baseURL: provider.baseURL,
-      timeout: 10000,
+      timeout: timeoutMs,
       headers: {
         'User-Agent': this.userAgent
       }
@@ -71,26 +108,41 @@ class RadioAPI {
   private async findWorkingAPI(): Promise<APIProvider | null> {
     // Sort providers by priority
     const sortedProviders = [...this.apiProviders].sort((a, b) => a.priority - b.priority)
-    
-    for (const provider of sortedProviders) {
-      try {
-        const instance = this.createAPIInstance(provider)
-        
-        // Test radio-browser endpoint
-        if (provider.type === 'radio-browser') {
-          await instance.get('/json/stations/topvote/1')
+
+    return await new Promise<APIProvider | null>((resolve) => {
+      let resolved = false
+      let remaining = sortedProviders.length
+
+      const maybeResolveNull = () => {
+        remaining -= 1
+        if (!resolved && remaining <= 0) {
+          resolve(null)
         }
-
-        if (this.debugEnabled) console.log(`Successfully connected to: ${provider.name}`)
-        provider.isAvailable = true
-
-        return provider
-      } catch (error: any) {
-        if (this.debugEnabled) console.log(`Failed to connect to ${provider.name}:`, error.message)
-        provider.isAvailable = false
       }
-    }
-    return null
+
+      for (const provider of sortedProviders) {
+        const instance = this.createAPIInstance(provider, 2500)
+        const testPromise =
+          provider.type === 'radio-browser'
+            ? instance.get('/json/stations/topvote/1')
+            : Promise.resolve()
+
+        testPromise
+          .then(() => {
+            provider.isAvailable = true
+            if (!resolved) {
+              resolved = true
+              if (this.debugEnabled) console.log(`Successfully connected to: ${provider.name}`)
+              resolve(provider)
+            }
+          })
+          .catch((error: any) => {
+            provider.isAvailable = false
+            if (this.debugEnabled) console.log(`Failed to connect to ${provider.name}:`, error.message)
+            maybeResolveNull()
+          })
+      }
+    })
   }
 
   // 确保API已初始化
@@ -174,6 +226,12 @@ class RadioAPI {
         }
       })
 
+      const cacheKey = this.stableSerialize(searchParams)
+      const cached = this.getFromCache(this.cache.stationSearch, cacheKey)
+      if (cached) {
+        return cached
+      }
+
       if (this.debugEnabled) console.log('搜索参数:', searchParams)
       
       const response = await this.currentAPI.get('/json/stations/search', {
@@ -193,48 +251,71 @@ class RadioAPI {
       })
       
       if (this.debugEnabled) console.log(`搜索结果数量: ${response.data.length}`)
-      return response.data || []
+      const data = response.data || []
+      this.setCache(this.cache.stationSearch, cacheKey, data)
+      return data
     })
   }
 
   // Get popular stations
-  async getTopStations(limit: number = 50, userLanguage?: string): Promise<ApiResponse<RadioStation[]>> {
+  async getTopStations(limit: number = 50, userLanguage?: string, options: CacheOptions = {}): Promise<ApiResponse<RadioStation[]>> {
     return this.retryWithFallback(async () => {
+      const cacheKey = `${limit}:${userLanguage || ''}`
+      if (!options.bypassCache) {
+        const cached = this.getFromCache(this.cache.topStations, cacheKey)
+        if (cached) {
+          return cached
+        }
+      }
+
       if (this.debugEnabled) console.log(`Getting top stations (limit: ${limit}, language: ${userLanguage})`)
       
       if (this.currentProvider.type === 'radio-browser') {
         // Recommend stations based on user language
         if (userLanguage === 'zh') {
           if (this.debugEnabled) console.log('User language is Chinese, getting Chinese music stations...')
-          const musicStations = await this.searchStations({
+          const musicStationsPromise = this.searchStations({
             language: 'chinese',
             tag: 'music',
             order: 'random',
-            limit: limit * 2,
+            limit: limit,
+            hidebroken: true
+          })
+          const additionalStationsPromise = this.searchStations({
+            countrycode: 'CN',
+            order: 'random',
+            limit: limit,
             hidebroken: true
           })
           
-          // If Chinese stations are insufficient, supplement with stations from China
-          if (musicStations.length < limit) {
-            const additionalStations = await this.searchStations({
-              countrycode: 'CN',
-              order: 'random',
-              limit: (limit - musicStations.length) * 2,
-              hidebroken: true
-            })
-            
-            // Merge and deduplicate
-            const existingUuids = new Set(musicStations.map(s => s.stationuuid))
-            const filteredAdditional = additionalStations.filter(s => !existingUuids.has(s.stationuuid))
-            musicStations.push(...filteredAdditional)
+          const [musicStations, additionalStations] = await Promise.all([musicStationsPromise, additionalStationsPromise])
+
+          const merged: RadioStation[] = []
+          const seen = new Set<string>()
+
+          for (const s of musicStations) {
+            if (!seen.has(s.stationuuid)) {
+              seen.add(s.stationuuid)
+              merged.push(s)
+            }
           }
-          
-          const shuffled = musicStations.sort(() => 0.5 - Math.random())
-          return {
+          for (const s of additionalStations) {
+            if (!seen.has(s.stationuuid)) {
+              seen.add(s.stationuuid)
+              merged.push(s)
+            }
+          }
+
+          const shuffled = merged.sort(() => 0.5 - Math.random())
+          const result = {
             success: true,
             data: shuffled.slice(0, limit),
             source: 'radio-browser'
           }
+          if (!options.bypassCache) {
+            this.setCache(this.cache.topStations, cacheKey, result)
+          }
+          return result
         }
         
         // Station recommendations for other languages
@@ -271,30 +352,43 @@ class RadioAPI {
           
           // If language search results are insufficient, search by country
           if (musicStations.length < limit && langConfig.countries) {
-            for (const country of langConfig.countries) {
+            const needed = limit - musicStations.length
+            const countriesToTry = langConfig.countries.slice(0, 2)
+            const countryResults = await Promise.all(
+              countriesToTry.map(country =>
+                this.searchStations({
+                  countrycode: country,
+                  order: 'random',
+                  limit: needed,
+                  hidebroken: true
+                })
+              )
+            )
+
+            const existingUuids = new Set(musicStations.map(s => s.stationuuid))
+            for (const list of countryResults) {
+              for (const s of list) {
+                if (musicStations.length >= limit) break
+                if (!existingUuids.has(s.stationuuid)) {
+                  existingUuids.add(s.stationuuid)
+                  musicStations.push(s)
+                }
+              }
               if (musicStations.length >= limit) break
-              
-              const countryStations = await this.searchStations({
-                countrycode: country,
-                order: 'random',
-                limit: limit - musicStations.length,
-                hidebroken: true
-              })
-              
-              // Merge and deduplicate
-              const existingUuids = new Set(musicStations.map(s => s.stationuuid))
-              const filteredCountryStations = countryStations.filter(s => !existingUuids.has(s.stationuuid))
-              musicStations.push(...filteredCountryStations)
             }
           }
           
           if (musicStations.length > 0) {
             const shuffled = musicStations.sort(() => 0.5 - Math.random())
-            return {
+            const result = {
               success: true,
               data: shuffled.slice(0, limit),
               source: 'radio-browser'
             }
+            if (!options.bypassCache) {
+              this.setCache(this.cache.topStations, cacheKey, result)
+            }
+            return result
           }
         }
         
@@ -309,24 +403,40 @@ class RadioAPI {
         })
         
         const shuffled = defaultStations.sort(() => 0.5 - Math.random())
-        return {
+        const result = {
           success: true,
           data: shuffled.slice(0, limit),
           source: 'radio-browser'
         }
+        if (!options.bypassCache) {
+          this.setCache(this.cache.topStations, cacheKey, result)
+        }
+        return result
       }
       
-      return {
+      const result = {
         success: false,
         data: [],
         source: 'unknown'
       }
+      if (!options.bypassCache) {
+        this.setCache(this.cache.topStations, cacheKey, result)
+      }
+      return result
     })
   }
 
   // Get latest stations
-  async getLatestStations(limit: number = 50): Promise<RadioStation[]> {
+  async getLatestStations(limit: number = 50, options: CacheOptions = {}): Promise<RadioStation[]> {
     return this.retryWithFallback(async () => {
+      const cacheKey = String(limit)
+      if (!options.bypassCache) {
+        const cached = this.getFromCache(this.cache.latestStations, cacheKey)
+        if (cached) {
+          return cached
+        }
+      }
+
       if (this.debugEnabled) console.log(`Getting latest stations (limit: ${limit})`)
       
       const stations = await this.searchStations({
@@ -336,6 +446,9 @@ class RadioAPI {
         hidebroken: true
       })
       if (this.debugEnabled) console.log(`Got ${stations.length} latest stations`)
+      if (!options.bypassCache) {
+        this.setCache(this.cache.latestStations, cacheKey, stations)
+      }
       return stations
     }, () => {
       // 回退：API不可用时返回空数组

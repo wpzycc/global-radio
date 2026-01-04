@@ -43,7 +43,24 @@ npm run preview -- --host 0.0.0.0 --port 4173
 npm run build
 ```
 
-2) 参考 nginx-static.conf 配置站点 root 指向 `dist/`，然后重载 Nginx。
+2) 部署构建产物（示例）：
+
+```bash
+rm -rf /var/www/radio-app/dist
+mkdir -p /var/www/radio-app
+cp -r dist /var/www/radio-app/dist
+```
+
+3) 参考 nginx-static.conf 配置站点 root 指向 `dist/`，然后重载 Nginx：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+静态站点要点：
+- SPA 路由需要回退到 index.html（nginx-static.conf 已包含示例）
+- 建议对静态资源开启缓存（js/css/svg/png 等），对 index.html 关闭缓存，避免更新后仍加载旧版本
 
 ## 环境变量
 
@@ -53,8 +70,16 @@ npm run build
 
 - 生产环境建议使用 Nginx 托管 `dist/`，前端不需要长期运行 Vite 服务。
 - 如需临时自测，可用 `npm run preview` 在指定端口提供静态预览。
+- 首页“音乐电台/最新电台”列表有内存缓存（默认 5 分钟），刷新按钮会绕过缓存重新拉取数据。
 
 ## Docker 部署
+
+安装 Docker（Linux，推荐参考官方文档；也可使用便捷安装脚本）：
+
+```bash
+curl -fsSL https://get.docker.com | sh
+sudo systemctl enable --now docker
+```
 
 构建镜像：
 
@@ -71,27 +96,23 @@ docker run --rm -p 8080:80 radio-aabb-live:latest
 浏览器访问：
 - http://localhost:8080/
 
-## GitHub 托管
+建议用于生产的运行方式：
 
-1) 初始化本地 Git 仓库并提交：
-
-```bash
-git init
-git config user.name "moli-xia"
-git config user.email "yangbinbai@gmail.com"
-git add .
-git commit -m "Initial commit"
-```
-
-2) 在 GitHub 上新建仓库（例如：radio-aabb-live），然后添加远程并推送：
+1) 直接运行（前置 8080）：
 
 ```bash
-git branch -M main
-git remote add origin https://github.com/moli-xia/radio-aabb-live.git
-git push -u origin main
+docker run -d --name radio-aabb-live --restart unless-stopped -p 8080:80 radio-aabb-live:latest
 ```
 
-如需命令行认证，推荐使用 GitHub Personal Access Token（PAT）或 SSH Key，不要使用账号密码。
+2) 需要自定义域名与 HTTPS 时：在宿主机用 Nginx / Caddy 做反向代理到 `127.0.0.1:8080`，容器内只负责静态资源服务。
+
+更新部署（Docker）：
+
+```bash
+docker build -t radio-aabb-live:latest .
+docker rm -f radio-aabb-live || true
+docker run -d --name radio-aabb-live --restart unless-stopped -p 8080:80 radio-aabb-live:latest
+```
 
 ## 常见问题：无法访问
 

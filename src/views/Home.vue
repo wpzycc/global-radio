@@ -137,17 +137,17 @@
           <h2 class="text-xl font-semibold text-ios-dark-gray dark:text-dark-text">{{ languageStore.t('home.musicStations') || '音乐电台' }}</h2>
           <button
             @click="refreshTopStations"
-            :disabled="radioStore.isLoading"
+            :disabled="radioStore.isLoadingTopStations"
             class="relative p-2 rounded-full bg-gradient-to-r from-ios-blue to-purple-500 hover:from-purple-500 hover:to-ios-blue transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:scale-100 disabled:shadow-lg"
             :title="languageStore.t('home.refresh')"
           >
             <ArrowPathIcon 
-              :class="['w-5 h-5 text-white drop-shadow-sm', { 'animate-spin': radioStore.isLoading }]" 
+              :class="['w-5 h-5 text-white drop-shadow-sm', { 'animate-spin': radioStore.isLoadingTopStations }]" 
             />
           </button>
         </div>
         
-        <div v-if="radioStore.isLoading && radioStore.topStations.length === 0" 
+        <div v-if="radioStore.isLoadingTopStations && radioStore.topStations.length === 0" 
              class="mobile:space-y-3 desktop:grid desktop:grid-cols-4 desktop:gap-4">
           <StationSkeleton v-for="i in displayCount" :key="i" />
         </div>
@@ -192,7 +192,7 @@
           </div>
           <button
             @click="loadRecommendedStations"
-            :disabled="isLoadingRecommended"
+            :disabled="isLoadingRecommended || radioStore.isLoadingTopStations"
             class="relative p-2 rounded-full bg-gradient-to-r from-ios-blue to-purple-500 hover:from-purple-500 hover:to-ios-blue transition-all duration-300 transform hover:scale-105 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:scale-100 disabled:shadow-lg"
             :title="languageStore.t('home.refresh')"
           >
@@ -242,7 +242,7 @@
           <h2 class="text-xl font-semibold text-ios-dark-gray dark:text-dark-text">{{ languageStore.t('home.latestStations') || '最新电台' }}</h2>
         </div>
         
-        <div v-if="radioStore.isLoading && radioStore.latestStations.length === 0" 
+        <div v-if="radioStore.isLoadingLatestStations && radioStore.latestStations.length === 0" 
              class="mobile:space-y-3 desktop:grid desktop:grid-cols-4 desktop:gap-4">
           <StationSkeleton v-for="i in displayCount" :key="i" />
         </div>
@@ -316,6 +316,25 @@ const toastStore = useToastStore()
 const recommendedStations = ref<RadioStation[]>([])
 const isLoadingRecommended = ref(false)
 
+const shuffleStations = (input: RadioStation[]) => {
+  const items = input.slice()
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const tmp = items[i]
+    items[i] = items[j]
+    items[j] = tmp
+  }
+  return items
+}
+
+const refreshRecommendedFromTop = () => {
+  if (radioStore.topStations.length === 0) {
+    recommendedStations.value = []
+    return
+  }
+  recommendedStations.value = shuffleStations(radioStore.topStations).slice(0, 50)
+}
+
 // 响应式显示数量
 const displayCount = computed(() => {
   if (typeof window !== 'undefined') {
@@ -388,14 +407,17 @@ const loadRandomStations = async () => {
 
 const refreshTopStations = async () => {
   await radioStore.loadTopStations({ force: true })
+  refreshRecommendedFromTop()
 }
 
 // 加载推荐电台
 const loadRecommendedStations = async () => {
   isLoadingRecommended.value = true
   try {
-    const stations = await radioStore.getRecommendedStations()
-    recommendedStations.value = stations
+    if (radioStore.topStations.length === 0) {
+      await radioStore.loadTopStations()
+    }
+    refreshRecommendedFromTop()
   } catch (error) {
     console.error('加载推荐电台失败:', error)
   } finally {
@@ -422,28 +444,12 @@ onMounted(() => {
   // 立即显示页面，异步加载数据
   const initializeData = async () => {
     try {
-      // 立即开始加载基础数据
-      const loadBasicData = async () => {
-        const promises = []
-        
-        if (radioStore.topStations.length === 0) {
-          promises.push(radioStore.loadTopStations())
-        }
-        
-        if (radioStore.latestStations.length === 0) {
-          promises.push(radioStore.loadLatestStations())
-        }
-        
-        // 加载推荐电台
-        promises.push(loadRecommendedStations())
-        
-        if (promises.length > 0) {
-          await Promise.all(promises)
-        }
-      }
-      
-      // 执行基础数据加载
-      await loadBasicData()
+      const topPromise = radioStore.topStations.length === 0 ? radioStore.loadTopStations() : Promise.resolve()
+      const latestPromise = radioStore.latestStations.length === 0 ? radioStore.loadLatestStations() : Promise.resolve()
+
+      await topPromise
+      refreshRecommendedFromTop()
+      await latestPromise
       
     } catch (error: any) {
       console.error('数据初始化失败:', error)
